@@ -11,6 +11,10 @@ pub fn parse_input(raw: &str) -> Result<SteamInput, String> {
         return Err("input is empty".to_string());
     }
 
+    if s.starts_with("http://") || s.starts_with("https://") {
+        return parse_url(s);
+    }
+
     if s.chars().all(|c| c.is_ascii_digit()) {
         return parse_steam64_str(s);
     }
@@ -22,6 +26,35 @@ pub fn parse_input(raw: &str) -> Result<SteamInput, String> {
     }
 
     Err(format!("unrecognized input: {:?}", s))
+}
+
+fn parse_url(url: &str) -> Result<SteamInput, String> {
+    let without_scheme = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+
+    let parts: Vec<&str> = without_scheme.splitn(4, '/').collect();
+
+    let host = parts.first().copied().unwrap_or("");
+    if host != "steamcommunity.com" {
+        return Err(format!("unrecognized host: {:?}", host));
+    }
+
+    let path_type = parts.get(1).copied().unwrap_or("");
+    let value = parts.get(2).copied().unwrap_or("").trim_end_matches('/');
+
+    match path_type {
+        "profiles" => parse_steam64_str(value),
+        "id" => {
+            if value.is_empty() {
+                Err("vanity handle in URL is empty".to_string())
+            } else {
+                Ok(SteamInput::Vanity(value.to_string()))
+            }
+        }
+        other => Err(format!("unrecognized URL path: {:?}", other)),
+    }
 }
 
 fn parse_steam64_str(s: &str) -> Result<SteamInput, String> {
@@ -88,5 +121,47 @@ mod tests {
     #[test]
     fn vanity_whitespace_only_is_rejected() {
         assert!(parse_input("   ").is_err());
+    }
+
+    #[test]
+    fn url_profiles_extracts_steam64() {
+        assert_eq!(
+            parse_input("https://steamcommunity.com/profiles/76561197960287930"),
+            Ok(SteamInput::Steam64(76561197960287930))
+        );
+    }
+
+    #[test]
+    fn url_id_extracts_vanity() {
+        assert_eq!(
+            parse_input("https://steamcommunity.com/id/gaben"),
+            Ok(SteamInput::Vanity("gaben".to_string()))
+        );
+    }
+
+    #[test]
+    fn url_trailing_slash_normalised() {
+        assert_eq!(
+            parse_input("https://steamcommunity.com/id/gaben/"),
+            Ok(SteamInput::Vanity("gaben".to_string()))
+        );
+    }
+
+    #[test]
+    fn url_http_scheme_accepted() {
+        assert_eq!(
+            parse_input("http://steamcommunity.com/id/gaben"),
+            Ok(SteamInput::Vanity("gaben".to_string()))
+        );
+    }
+
+    #[test]
+    fn url_wrong_domain_is_rejected() {
+        assert!(parse_input("https://example.com/id/gaben").is_err());
+    }
+
+    #[test]
+    fn url_profiles_bad_id_is_rejected() {
+        assert!(parse_input("https://steamcommunity.com/profiles/notanumber").is_err());
     }
 }
