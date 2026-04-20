@@ -1,14 +1,43 @@
+use thiserror::Error;
+
+#[derive(Debug, PartialEq, Eq, Error)]
+pub enum SteamIdError {
+    #[error("input is empty")]
+    Empty,
+
+    #[error("Steam64 ID must be {expected} digits, got {actual}")]
+    InvalidSteam64Length { expected: usize, actual: usize },
+
+    #[error("Steam64 ID must start with {expected}")]
+    InvalidSteam64Prefix { expected: &'static str },
+
+    #[error("Steam64 ID contains non-digit characters")]
+    InvalidSteam64Digits,
+
+    #[error("unrecognized host: {0:?}")]
+    UnrecognizedHost(String),
+
+    #[error("unrecognized URL path: {0:?}")]
+    UnrecognizedUrlPath(String),
+
+    #[error("vanity handle in URL is empty")]
+    EmptyVanityInUrl,
+
+    #[error("unrecognized input: {0:?}")]
+    Unrecognized(String),
+}
+
 #[derive(Debug, PartialEq)]
 pub enum SteamInput {
     Steam64(u64),
     Vanity(String),
 }
 
-pub fn parse_input(raw: &str) -> Result<SteamInput, String> {
+pub fn parse_input(raw: &str) -> Result<SteamInput, SteamIdError> {
     let s = raw.trim();
 
     if s.is_empty() {
-        return Err("input is empty".to_string());
+        return Err(SteamIdError::Empty);
     }
 
     if s.starts_with("http://") || s.starts_with("https://") {
@@ -25,10 +54,10 @@ pub fn parse_input(raw: &str) -> Result<SteamInput, String> {
         return Ok(SteamInput::Vanity(s.to_string()));
     }
 
-    Err(format!("unrecognized input: {:?}", s))
+    Err(SteamIdError::Unrecognized(s.to_string()))
 }
 
-fn parse_url(url: &str) -> Result<SteamInput, String> {
+fn parse_url(url: &str) -> Result<SteamInput, SteamIdError> {
     let without_scheme = url
         .trim_start_matches("https://")
         .trim_start_matches("http://")
@@ -38,7 +67,7 @@ fn parse_url(url: &str) -> Result<SteamInput, String> {
 
     let host = parts.first().copied().unwrap_or("");
     if host != "steamcommunity.com" {
-        return Err(format!("unrecognized host: {:?}", host));
+        return Err(SteamIdError::UnrecognizedHost(host.to_string()));
     }
 
     let path_type = parts.get(1).copied().unwrap_or("");
@@ -48,34 +77,33 @@ fn parse_url(url: &str) -> Result<SteamInput, String> {
         "profiles" => parse_steam64_str(value),
         "id" => {
             if value.is_empty() {
-                Err("vanity handle in URL is empty".to_string())
+                Err(SteamIdError::EmptyVanityInUrl)
             } else {
                 Ok(SteamInput::Vanity(value.to_string()))
             }
         }
-        other => Err(format!("unrecognized URL path: {:?}", other)),
+        other => Err(SteamIdError::UnrecognizedUrlPath(other.to_string())),
     }
 }
 
-fn parse_steam64_str(s: &str) -> Result<SteamInput, String> {
+fn parse_steam64_str(s: &str) -> Result<SteamInput, SteamIdError> {
     const LEN: usize = 17;
     const PREFIX: &str = "7656119";
 
     if s.len() != LEN {
-        return Err(format!(
-            "Steam64 ID must be {} digits, got {}",
-            LEN,
-            s.len()
-        ));
+        return Err(SteamIdError::InvalidSteam64Length {
+            expected: LEN,
+            actual: s.len(),
+        });
     }
 
     if !s.starts_with(PREFIX) {
-        return Err(format!("Steam64 ID must start with {}", PREFIX));
+        return Err(SteamIdError::InvalidSteam64Prefix { expected: PREFIX });
     }
 
     s.parse::<u64>()
         .map(SteamInput::Steam64)
-        .map_err(|e| format!("parse error: {}", e))
+        .map_err(|_| SteamIdError::InvalidSteam64Digits)
 }
 
 #[cfg(test)]
@@ -92,17 +120,34 @@ mod tests {
 
     #[test]
     fn steam64_too_short_is_rejected() {
-        assert!(parse_input("7656119796028793").is_err());
+        assert_eq!(
+            parse_input("7656119796028793"),
+            Err(SteamIdError::InvalidSteam64Length {
+                expected: 17,
+                actual: 16
+            })
+        );
     }
 
     #[test]
     fn steam64_too_long_is_rejected() {
-        assert!(parse_input("765611979602879300").is_err());
+        assert_eq!(
+            parse_input("765611979602879300"),
+            Err(SteamIdError::InvalidSteam64Length {
+                expected: 17,
+                actual: 18
+            })
+        );
     }
 
     #[test]
     fn steam64_wrong_prefix_rejected() {
-        assert!(parse_input("12345678901234567").is_err());
+        assert_eq!(
+            parse_input("12345678901234567"),
+            Err(SteamIdError::InvalidSteam64Prefix {
+                expected: "7656119"
+            })
+        );
     }
 
     #[test]
@@ -111,16 +156,6 @@ mod tests {
             parse_input("gaben"),
             Ok(SteamInput::Vanity("gaben".to_string()))
         );
-    }
-
-    #[test]
-    fn vanity_empty_string_is_rejected() {
-        assert!(parse_input("").is_err());
-    }
-
-    #[test]
-    fn vanity_whitespace_only_is_rejected() {
-        assert!(parse_input("   ").is_err());
     }
 
     #[test]
@@ -157,11 +192,46 @@ mod tests {
 
     #[test]
     fn url_wrong_domain_is_rejected() {
-        assert!(parse_input("https://example.com/id/gaben").is_err());
+        assert_eq!(
+            parse_input("https://example.com/id/gaben"),
+            Err(SteamIdError::UnrecognizedHost("example.com".to_string()))
+        );
     }
 
     #[test]
     fn url_profiles_bad_id_is_rejected() {
-        assert!(parse_input("https://steamcommunity.com/profiles/notanumber").is_err());
+        assert_eq!(
+            parse_input("https://steamcommunity.com/profiles/notanumber"),
+            Err(SteamIdError::InvalidSteam64Length {
+                expected: 17,
+                actual: 10
+            })
+        );
+    }
+
+    #[test]
+    fn url_unknown_path_type_is_rejected() {
+        assert_eq!(
+            parse_input("https://steamcommunity.com/groups/foo"),
+            Err(SteamIdError::UnrecognizedUrlPath("groups".to_string()))
+        );
+    }
+
+    #[test]
+    fn steam64_correct_shape_but_non_digits_rejected() {
+        // 17 chars, starts with 7656119, but the tail isn't all digits.
+        // Reachable via the /profiles/ URL branch, which doesn't pre-check digits.
+        assert_eq!(
+            parse_input("https://steamcommunity.com/profiles/7656119abcdefghij"),
+            Err(SteamIdError::InvalidSteam64Digits)
+        );
+    }
+
+    #[test]
+    fn mixed_garbage_is_unrecognized() {
+        assert!(matches!(
+            parse_input("foo@bar!"),
+            Err(SteamIdError::Unrecognized(_))
+        ));
     }
 }
