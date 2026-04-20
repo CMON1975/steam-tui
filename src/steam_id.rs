@@ -8,6 +8,13 @@ pub enum SteamIdError {
     #[error("Steam64 ID must be {expected} digits, got {actual}")]
     InvalidSteam64Length { expected: usize, actual: usize },
 
+    #[error("vanity handle must be {min}-{max} characters, got {actual}")]
+    InvalidVanityLength {
+        min: usize,
+        max: usize,
+        actual: usize,
+    },
+
     #[error("Steam64 ID must start with {expected}")]
     InvalidSteam64Prefix { expected: &'static str },
 
@@ -44,17 +51,15 @@ pub fn parse_input(raw: &str) -> Result<SteamInput, SteamIdError> {
         return parse_url(s);
     }
 
-    if s.chars().all(|c| c.is_ascii_digit()) {
+    // Dispatch by length, not by character set.
+    // Exactly 17 digits -> almost certainly an attempted Steam64 ID; let the
+    // Steam64 validator produce a specific error (wrong prefix, etc.).
+    // Anything else is a vanity handle candidate.
+    if s.len() == 17 && s.chars().all(|c| c.is_ascii_digit()) {
         return parse_steam64_str(s);
     }
 
-    if s.chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Ok(SteamInput::Vanity(s.to_string()));
-    }
-
-    Err(SteamIdError::Unrecognized(s.to_string()))
+    parse_vanity(s)
 }
 
 fn parse_url(url: &str) -> Result<SteamInput, SteamIdError> {
@@ -106,6 +111,29 @@ fn parse_steam64_str(s: &str) -> Result<SteamInput, SteamIdError> {
         .map_err(|_| SteamIdError::InvalidSteam64Digits)
 }
 
+fn parse_vanity(s: &str) -> Result<SteamInput, SteamIdError> {
+    const MIN: usize = 3;
+    const MAX: usize = 32;
+
+    let len = s.chars().count();
+    if !(MIN..=MAX).contains(&len) {
+        return Err(SteamIdError::InvalidVanityLength {
+            min: MIN,
+            max: MAX,
+            actual: len,
+        });
+    }
+
+    if !s
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(SteamIdError::Unrecognized(s.to_string()));
+    }
+
+    Ok(SteamInput::Vanity(s.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,24 +147,22 @@ mod tests {
     }
 
     #[test]
-    fn steam64_too_short_is_rejected() {
+    fn sixteen_digit_input_treated_as_vanity() {
+        // With length-based dispatch, all-digit inputs of length != 17 are
+        // vanity handles, not malformed Steam64 attempts. If the user really
+        // meant a Steam64, the downstream API lookup will surface that.
         assert_eq!(
             parse_input("7656119796028793"),
-            Err(SteamIdError::InvalidSteam64Length {
-                expected: 17,
-                actual: 16
-            })
+            Ok(SteamInput::Vanity("7656119796028793".to_string()))
         );
     }
 
     #[test]
-    fn steam64_too_long_is_rejected() {
+    fn eighteen_digit_input_treated_as_vanity() {
+        // Same reasoning, on the other side of the length boundary.
         assert_eq!(
             parse_input("765611979602879300"),
-            Err(SteamIdError::InvalidSteam64Length {
-                expected: 17,
-                actual: 18
-            })
+            Ok(SteamInput::Vanity("765611979602879300".to_string()))
         );
     }
 
@@ -233,5 +259,59 @@ mod tests {
             parse_input("foo@bar!"),
             Err(SteamIdError::Unrecognized(_))
         ));
+    }
+
+    #[test]
+    fn numeric_vanity_handle_is_parsed() {
+        // All-digit handles shorter than 17 chars should be treated as vanity,
+        // not as malformed Steam64 IDs.
+        assert_eq!(
+            parse_input("12345"),
+            Ok(SteamInput::Vanity("12345".to_string()))
+        );
+    }
+
+    #[test]
+    fn numeric_vanity_handle_at_max_length_is_parsed() {
+        // 32 digits: valid vanity length, not 17, so not a Steam64 attempt.
+        let handle = "1".repeat(32);
+        assert_eq!(parse_input(&handle), Ok(SteamInput::Vanity(handle.clone())));
+    }
+
+    #[test]
+    fn vanity_too_short_is_rejected() {
+        assert_eq!(
+            parse_input("ab"),
+            Err(SteamIdError::InvalidVanityLength {
+                min: 3,
+                max: 32,
+                actual: 2
+            })
+        );
+    }
+
+    #[test]
+    fn vanity_too_long_is_rejected() {
+        let handle = "a".repeat(33);
+        assert_eq!(
+            parse_input(&handle),
+            Err(SteamIdError::InvalidVanityLength {
+                min: 3,
+                max: 32,
+                actual: 33
+            })
+        );
+    }
+
+    #[test]
+    fn seventeen_digit_non_steam64_still_tried_as_steam64() {
+        // 17 digits but wrong prefix: user almost certainly meant a Steam64,
+        // so the prefix error is more useful than a vanity error.
+        assert_eq!(
+            parse_input("12345678901234567"),
+            Err(SteamIdError::InvalidSteam64Prefix {
+                expected: "7656119"
+            })
+        );
     }
 }
