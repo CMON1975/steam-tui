@@ -63,16 +63,24 @@ pub fn parse_input(raw: &str) -> Result<SteamInput, SteamIdError> {
 }
 
 fn parse_url(url: &str) -> Result<SteamInput, SteamIdError> {
+    // Strip scheme, then query string and fragment (everything from
+    // the first '?' or '#' onward is irrelevant for identification),
+    // then any trailing slash
     let without_scheme = url
         .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/');
+        .trim_start_matches("http://");
+    let without_query = without_scheme.split(['?', '#']).next().unwrap_or("");
+    let trimmed = without_query.trim_end_matches('/');
 
-    let parts: Vec<&str> = without_scheme.splitn(4, '/').collect();
+    let parts: Vec<&str> = trimmed.splitn(4, '/').collect();
 
-    let host = parts.first().copied().unwrap_or("");
-    if host != "steamcommunity.com" {
-        return Err(SteamIdError::UnrecognizedHost(host.to_string()));
+    let host_raw = parts.first().copied().unwrap_or("");
+    let host_normalized = host_raw
+        .to_ascii_lowercase()
+        .trim_start_matches("www.")
+        .to_string();
+    if host_normalized != "steamcommunity.com" {
+        return Err(SteamIdError::UnrecognizedHost(host_raw.to_string()));
     }
 
     let path_type = parts.get(1).copied().unwrap_or("");
@@ -84,7 +92,7 @@ fn parse_url(url: &str) -> Result<SteamInput, SteamIdError> {
             if value.is_empty() {
                 Err(SteamIdError::EmptyVanityInUrl)
             } else {
-                Ok(SteamInput::Vanity(value.to_string()))
+                parse_vanity(value)
             }
         }
         other => Err(SteamIdError::UnrecognizedUrlPath(other.to_string())),
@@ -312,6 +320,139 @@ mod tests {
             Err(SteamIdError::InvalidSteam64Prefix {
                 expected: "7656119"
             })
+        );
+    }
+
+    #[test]
+    fn url_id_too_short_is_rejected() {
+        // Handles in /id/<handle> URLs must pass the same length rules as
+        // bare vanity input. Currently this bypasses parse_vanity.
+        assert_eq!(
+            parse_input("https://steamcommunity.com/id/ab"),
+            Err(SteamIdError::InvalidVanityLength {
+                min: 3,
+                max: 32,
+                actual: 2
+            })
+        );
+    }
+
+    #[test]
+    fn url_id_too_long_is_rejected() {
+        let handle = "a".repeat(33);
+        let url = format!("https://steamcommunity.com/id/{}", handle);
+        assert_eq!(
+            parse_input(&url),
+            Err(SteamIdError::InvalidVanityLength {
+                min: 3,
+                max: 32,
+                actual: 33
+            })
+        );
+    }
+
+    #[test]
+    fn url_id_bad_chars_is_rejected() {
+        assert!(matches!(
+            parse_input("https://steamcommunity.com/id/foo@bar"),
+            Err(SteamIdError::Unrecognized(_))
+        ));
+    }
+
+    #[test]
+    fn url_with_query_string_is_stripped() {
+        // Query strings are irrelevant to identifying the profile.
+        assert_eq!(
+            parse_input("https://steamcommunity.com/id/gaben?tab=games"),
+            Ok(SteamInput::Vanity("gaben".to_string()))
+        );
+    }
+
+    #[test]
+    fn url_with_fragment_is_stripped() {
+        assert_eq!(
+            parse_input("https://steamcommunity.com/id/gaben#overview"),
+            Ok(SteamInput::Vanity("gaben".to_string()))
+        );
+    }
+
+    #[test]
+    fn url_with_query_on_profiles_is_stripped() {
+        assert_eq!(
+            parse_input("https://steamcommunity.com/profiles/76561197960287930?tab=games"),
+            Ok(SteamInput::Steam64(76561197960287930))
+        );
+    }
+
+    #[test]
+    fn url_with_fragment_and_trailing_slash_is_stripped() {
+        // Combine two normalizations, trailing slash and fragment, to
+        // guard against ordering bugs in the stripping logic.
+        assert_eq!(
+            parse_input("https://steamcommunity.com/id/gaben/#overview"),
+            Ok(SteamInput::Vanity("gaben".to_string()))
+        );
+    }
+
+    #[test]
+    fn url_with_www_prefix_accepted() {
+        assert_eq!(
+            parse_input("https://www.steamcommunity.com/id/gaben"),
+            Ok(SteamInput::Vanity("gaben".to_string()))
+        );
+    }
+
+    #[test]
+    fn url_with_uppercase_host_accepted() {
+        // DNS is case-insensitive; users paste URLs from all kinds of sources.
+        assert_eq!(
+            parse_input("https://STEAMCOMMUNITY.COM/id/gaben"),
+            Ok(SteamInput::Vanity("gaben".to_string()))
+        );
+    }
+
+    #[test]
+    fn url_with_mixed_case_and_www_accepted() {
+        assert_eq!(
+            parse_input("https://WWW.SteamCommunity.com/profiles/76561197960287930"),
+            Ok(SteamInput::Steam64(76561197960287930))
+        );
+    }
+
+    #[test]
+    fn url_host_case_does_not_affect_rejection() {
+        // A bad host should still be rejected after case-normalization.
+        // The error message should carry the host as the user typed it,
+        // since that's what they need to see to diagnose the typo.
+        assert_eq!(
+            parse_input("https://EXAMPLE.com/id/gaben"),
+            Err(SteamIdError::UnrecognizedHost("EXAMPLE.com".to_string()))
+        );
+    }
+
+    #[test]
+    fn url_id_with_extra_path_segments_parses() {
+        // Common in practice — users paste from their current tab.
+        assert_eq!(
+            parse_input("https://steamcommunity.com/id/gaben/games/"),
+            Ok(SteamInput::Vanity("gaben".to_string()))
+        );
+    }
+
+    #[test]
+    fn url_profiles_with_extra_path_segments_parses() {
+        assert_eq!(
+            parse_input("https://steamcommunity.com/profiles/76561197960287930/friends/"),
+            Ok(SteamInput::Steam64(76561197960287930))
+        );
+    }
+
+    #[test]
+    fn url_id_extra_segments_combined_with_query_and_fragment() {
+        // Stress test: extra path + query + fragment all at once.
+        assert_eq!(
+            parse_input("https://steamcommunity.com/id/gaben/games/?tab=all#recent"),
+            Ok(SteamInput::Vanity("gaben".to_string()))
         );
     }
 }
